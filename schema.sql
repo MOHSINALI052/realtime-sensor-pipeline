@@ -1,19 +1,21 @@
+-- PostgreSQL schema (used by the running pipeline)
+
 CREATE TABLE IF NOT EXISTS raw_readings (
   id BIGSERIAL PRIMARY KEY,
   sensor_id        TEXT NOT NULL,
   ts               TIMESTAMPTZ NOT NULL,
   source           TEXT NOT NULL,
   location         TEXT,
-  reading_type     TEXT NOT NULL,
+  reading_type     TEXT NOT NULL,     -- e.g., temperature, humidity, pressure
   reading_value    DOUBLE PRECISION NOT NULL,
-  unit             TEXT,
+  unit             TEXT,              -- e.g., C, %, hPa
   file_name        TEXT NOT NULL,
   ingested_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX IF NOT EXISTS idx_raw_ts ON raw_readings(ts);
-CREATE INDEX IF NOT EXISTS idx_raw_sensor_ts ON raw_readings(sensor_id, ts);
-CREATE INDEX IF NOT EXISTS idx_raw_type ON raw_readings(reading_type);
+CREATE INDEX IF NOT EXISTS idx_raw_ts         ON raw_readings(ts);
+CREATE INDEX IF NOT EXISTS idx_raw_sensor_ts  ON raw_readings(sensor_id, ts);
+CREATE INDEX IF NOT EXISTS idx_raw_type       ON raw_readings(reading_type);
 
 CREATE TABLE IF NOT EXISTS file_aggregates (
   id BIGSERIAL PRIMARY KEY,
