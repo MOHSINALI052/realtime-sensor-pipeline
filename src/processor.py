@@ -5,7 +5,7 @@ from typing import Dict, Any, List
 from .config import Config
 
 # Columns present in AirQuality.csv
-# Date (dd/mm/yyyy), Time (HH.MM.SS), T (°C), RH (%), باقی گیس سینسرز بھی ہیں
+# Date (dd/mm/yyyy), Time (HH.MM.SS), T (°C), RH (%),
 
 
 def load_csv_airquality(path: str) -> pd.DataFrame:
@@ -131,3 +131,11 @@ def to_raw_rows(valid: pd.DataFrame, file_name: str, source: str) -> list[dict[s
             'file_name': file_name,
         })
     return rows
+def build_timestamp(df: pd.DataFrame) -> pd.Series:
+    # AirQuality: Date "dd/mm/yyyy", Time "HH.MM.SS"
+    ts = pd.to_datetime(
+        df['Date'] + ' ' + df['Time'],
+        format='%d/%m/%Y %H.%M.%S',
+        errors='coerce'
+    )
+    return ts.dt.tz_localize('UTC')
