@@ -1,3 +1,4 @@
+# src/db.py
 from typing import Iterable, Dict, Any
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
@@ -7,10 +8,10 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 
 def make_engine(user: str, password: str, host: str, port: int, db: str) -> Engine:
     """
-    Create a pooled SQLAlchemy engine for PostgreSQL.
+    Create a pooled SQLAlchemy engine for PostgreSQL (psycopg2).
     """
     url = f"postgresql+psycopg2://{user}:{password}@{host}:{port}/{db}"
-    # Tune pool sizes conservatively for local dev; pool_pre_ping guards stale conns.
+    # conservative pool sizes for local dev; pool_pre_ping avoids stale connections
     engine = create_engine(url, pool_size=10, max_overflow=20, pool_pre_ping=True)
     return engine
 
@@ -22,7 +23,10 @@ def make_engine(user: str, password: str, host: str, port: int, db: str) -> Engi
 )
 def insert_raw(engine: Engine, rows: Iterable[Dict[str, Any]]):
     """
-    Insert raw rows. Step 15 will switch this to idempotent UPSERTs.
+    Idempotent insert of raw rows using ON CONFLICT (dedupe_key) DO NOTHING.
+
+    EXPECTED KEYS per row:
+      sensor_id, ts, source, location, reading_type, reading_value, unit, file_name, dedupe_key
     """
     rows = list(rows)
     if not rows:
@@ -32,9 +36,10 @@ def insert_raw(engine: Engine, rows: Iterable[Dict[str, Any]]):
             text(
                 """
                 INSERT INTO raw_readings
-                  (sensor_id, ts, source, location, reading_type, reading_value, unit, file_name)
+                  (sensor_id, ts, source, location, reading_type, reading_value, unit, file_name, dedupe_key)
                 VALUES
-                  (:sensor_id, :ts, :source, :location, :reading_type, :reading_value, :unit, :file_name)
+                  (:sensor_id, :ts, :source, :location, :reading_type, :reading_value, :unit, :file_name, :dedupe_key)
+                ON CONFLICT (dedupe_key) DO NOTHING
                 """
             ),
             rows,
@@ -48,7 +53,8 @@ def insert_raw(engine: Engine, rows: Iterable[Dict[str, Any]]):
 )
 def insert_aggregates(engine: Engine, rows: Iterable[Dict[str, Any]]):
     """
-    Insert per-file aggregates. Step 15 will switch this to UPSERT on (file_name, reading_type).
+    Upsert per-file aggregates on (file_name, reading_type).
+    Updates stats if the same file is reprocessed.
     """
     rows = list(rows)
     if not rows:
@@ -61,6 +67,16 @@ def insert_aggregates(engine: Engine, rows: Iterable[Dict[str, Any]]):
                   (file_name, source, reading_type, count, min_value, max_value, avg_value, stddev_value, window_start, window_end)
                 VALUES
                   (:file_name, :source, :reading_type, :count, :min_value, :max_value, :avg_value, :stddev_value, :window_start, :window_end)
+                ON CONFLICT (file_name, reading_type)
+                DO UPDATE SET
+                  count        = EXCLUDED.count,
+                  min_value    = EXCLUDED.min_value,
+                  max_value    = EXCLUDED.max_value,
+                  avg_value    = EXCLUDED.avg_value,
+                  stddev_value = EXCLUDED.stddev_value,
+                  window_start = EXCLUDED.window_start,
+                  window_end   = EXCLUDED.window_end,
+                  source       = EXCLUDED.source
                 """
             ),
             rows,

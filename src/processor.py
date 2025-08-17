@@ -1,29 +1,35 @@
+# src/processor.py
+
 from __future__ import annotations
-import pandas as pd
+
+import hashlib
+from typing import Any
+
 import numpy as np
-from typing import Dict, Any, List
+import pandas as pd
+
 from .config import Config
 
+
 # ------------------------------------------------------------
-# AirQuality loader
-# - Separator is ';' and decimal is ','
-# - Drops empty "Unnamed" columns
-# - Treats -200 (UCI AirQuality missing sentinel) as NaN
+# Loader for AirQuality.csv
+#  - separator ';', decimal ','
+#  - drops "Unnamed" empty columns
+#  - converts sentinel -200 to NaN (common in this dataset)
 # ------------------------------------------------------------
 def load_csv_airquality(path: str) -> pd.DataFrame:
     df = pd.read_csv(path, sep=";", decimal=",", low_memory=False)
-    # drop unnamed empties if any
     df = df[[c for c in df.columns if not c.lower().startswith("unnamed")]]
     # replace sentinel -200 with NaN for numeric cols
     for c in df.columns:
-        if df[c].dtype.kind in "biufc":  # numeric-like
+        if pd.api.types.is_numeric_dtype(df[c]):
             df[c] = df[c].replace(-200, np.nan)
     return df
 
 
 # ------------------------------------------------------------
-# Timestamp builder: merges Date (dd/mm/yyyy) + Time (HH.MM.SS)
-# and localizes to UTC. Explicit format removes pandas warnings.
+# Build UTC timestamp from Date (dd/mm/yyyy) + Time (HH.MM.SS)
+# Explicit format removes pandas warnings
 # ------------------------------------------------------------
 def build_timestamp(df: pd.DataFrame) -> pd.Series:
     ts = pd.to_datetime(
@@ -35,25 +41,27 @@ def build_timestamp(df: pd.DataFrame) -> pd.Series:
 
 
 # ------------------------------------------------------------
-# Validation + transformation to a normalized long format
-# Returns (valid_rows_df, invalid_rows_df)
-#   valid columns: sensor_id, ts, reading_type, reading_value, unit, location
-#   invalid has same + error_reason
+# Validation + transformation to normalized long format
+# Returns (valid_df, invalid_df)
+#   valid:   sensor_id, ts, reading_type, reading_value, unit, location
+#   invalid: same + error_reason
 # ------------------------------------------------------------
-def validate_transform(df: pd.DataFrame, cfg: Config, file_name: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+def validate_transform(
+    df: pd.DataFrame, cfg: Config, file_name: str
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     df = df.copy()
 
-    # required / metadata
+    # metadata / mandatory fields
     df["ts"] = build_timestamp(df)
     df["sensor_id"] = cfg.default_sensor_id
     df["location"] = cfg.default_location
 
-    # ensure T and RH are numeric (AirQuality sometimes reads them as object)
-    for col in ["T", "RH"]:
+    # make sure T/RH are numeric (sometimes parsed as object)
+    for col in ("T", "RH"):
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # pick numeric columns as potential measurements (gas, temp, humidity, etc.)
+    # numeric columns treated as measurements (gas sensors, T, RH, etc.)
     numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
 
     # key fields must exist
@@ -62,33 +70,32 @@ def validate_transform(df: pd.DataFrame, cfg: Config, file_name: str) -> tuple[p
     # melt wide → long
     value_cols = [c for c in numeric_cols if c not in {"sensor_id", "ts"}]
     long = df[["sensor_id", "ts", "location"] + value_cols].melt(
-        id_vars=["sensor_id", "ts", "location"], var_name="reading_type", value_name="reading_value"
+        id_vars=["sensor_id", "ts", "location"],
+        var_name="reading_type",
+        value_name="reading_value",
     )
 
-    # remove null measurements and rows missing key fields
+    # drop rows missing keys / measurement
     long = long[key_ok.repeat(len(value_cols)).values]
     long = long.dropna(subset=["reading_value"])
 
-    # units + range checks
+    # Map units + basic range checks for temperature/humidity
     def unit_and_check(rt: str, val: float) -> tuple[str | None, bool, str]:
         rtl = rt.lower()
         if rtl in ("t", "temp", "temperature"):
             unit = "C"
-            ok = (cfg.temp_min_c <= val <= cfg.temp_max_c)
-            canonical = "temperature"
-            return unit, ok, canonical
+            ok = cfg.temp_min_c <= val <= cfg.temp_max_c
+            return unit, ok, "temperature"
         if rtl in ("rh", "humidity"):
             unit = "%"
-            ok = (cfg.rh_min <= val <= cfg.rh_max)
-            canonical = "humidity"
-            return unit, ok, canonical
-        # other gas sensors: keep value, no strict range here
+            ok = cfg.rh_min <= val <= cfg.rh_max
+            return unit, ok, "humidity"
+        # passthrough for other sensors (e.g., gas)
         return None, True, rtl
 
-    units: List[str | None] = []
-    oks: List[bool] = []
-    canonical_types: List[str] = []
-
+    units: list[str | None] = []
+    oks: list[bool] = []
+    canonical_types: list[str] = []
     for rt, val in zip(long["reading_type"].astype(str), long["reading_value"].astype(float)):
         u, ok, cname = unit_and_check(rt, val)
         units.append(u)
@@ -99,25 +106,35 @@ def validate_transform(df: pd.DataFrame, cfg: Config, file_name: str) -> tuple[p
     long["reading_type"] = canonical_types
     valid_mask = pd.Series(oks, index=long.index)
 
-    invalid = long[~valid_mask | long[["sensor_id", "ts", "reading_value"]].isna().any(axis=1)].copy()
+    invalid = long[
+        ~valid_mask | long[["sensor_id", "ts", "reading_value"]].isna().any(axis=1)
+    ].copy()
     invalid["error_reason"] = np.where(~valid_mask, "out_of_range", "missing_key_field")
 
-    valid = long[valid_mask & long[["sensor_id", "ts", "reading_value"]].notna().all(axis=1)].copy()
+    valid = long[
+        valid_mask & long[["sensor_id", "ts", "reading_value"]].notna().all(axis=1)
+    ].copy()
     valid = valid[["sensor_id", "ts", "reading_type", "reading_value", "unit", "location"]]
 
     return valid, invalid
 
 
 # ------------------------------------------------------------
-# Aggregates: per reading_type within the file
+# Aggregates per reading_type within a single file
 # ------------------------------------------------------------
-def compute_aggregates(valid: pd.DataFrame, file_name: str, source: str) -> list[dict[str, Any]]:
+def compute_aggregates(
+    valid: pd.DataFrame, file_name: str, source: str
+) -> list[dict[str, Any]]:
     if valid.empty:
         return []
     window_start = valid["ts"].min()
     window_end = valid["ts"].max()
 
-    stats = valid.groupby("reading_type")["reading_value"].agg(["count", "min", "max", "mean", "std"]).reset_index()
+    stats = (
+        valid.groupby("reading_type")["reading_value"]
+        .agg(["count", "min", "max", "mean", "std"])
+        .reset_index()
+    )
 
     out: list[dict[str, Any]] = []
     for _, r in stats.iterrows():
@@ -139,23 +156,35 @@ def compute_aggregates(valid: pd.DataFrame, file_name: str, source: str) -> list
 
 
 # ------------------------------------------------------------
-# Convert valid rows DF → list[dict] for DB inserts
+# Idempotency key (Step 15): stable SHA-256 over key fields
+# ------------------------------------------------------------
+def _dedupe_key(sensor_id, ts, reading_type, file_name) -> str:
+    key = f"{sensor_id}|{pd.Timestamp(ts).isoformat()}|{reading_type}|{file_name}"
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()
+
+
+# ------------------------------------------------------------
+# Convert valid DF → list[dict] for DB inserts (includes dedupe_key)
 # ------------------------------------------------------------
 def to_raw_rows(valid: pd.DataFrame, file_name: str, source: str) -> list[dict[str, Any]]:
     if valid.empty:
         return []
     rows: list[dict[str, Any]] = []
     for row in valid.itertuples(index=False):
+        sensor_id = getattr(row, "sensor_id")
+        ts = getattr(row, "ts")
+        reading_type = getattr(row, "reading_type")
         rows.append(
             {
-                "sensor_id": getattr(row, "sensor_id"),
-                "ts": getattr(row, "ts"),
+                "sensor_id": sensor_id,
+                "ts": ts,
                 "source": source,
                 "location": getattr(row, "location"),
-                "reading_type": getattr(row, "reading_type"),
+                "reading_type": reading_type,
                 "reading_value": float(getattr(row, "reading_value")),
                 "unit": getattr(row, "unit"),
                 "file_name": file_name,
+                "dedupe_key": _dedupe_key(sensor_id, ts, reading_type, file_name),
             }
         )
     return rows
