@@ -26,3 +26,7 @@ copy .env.example .env
 
 # 4) Run the poller (checks inbox every 5s)
 python -m src.main
+### One-shot mode
+```powershell
+python -m src.main --once
+
