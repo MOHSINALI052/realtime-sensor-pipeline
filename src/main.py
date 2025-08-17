@@ -2,6 +2,7 @@
 import argparse
 import logging
 import time
+from datetime import datetime
 from pathlib import Path
 
 from src.config import Config
@@ -12,9 +13,9 @@ from src.processor import (
     compute_aggregates,
     to_raw_rows,
 )
-from src.utils import move_file
+from src.utils import move_file, copy_file
 
-# === Prometheus metrics (Step 17B) ===
+# ---- Prometheus metrics ----
 from prometheus_client import Counter, start_http_server
 
 FILES_PROCESSED = Counter("files_processed_total", "Files successfully processed")
@@ -23,15 +24,17 @@ RAW_ROWS_INSERTED = Counter("raw_rows_inserted_total", "Raw rows inserted into D
 AGG_ROWS_INSERTED = Counter("agg_rows_inserted_total", "Aggregate rows inserted/updated")
 PROCESS_ERRORS = Counter("process_errors_total", "Unhandled processing errors")
 
-
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+
+MARKER_SUFFIX = ".done"  # marker to skip already-processed files when KEEP_INCOMING=true
 
 
 def process_file(fp: Path, cfg: Config, data_dir: Path, engine):
     """
-    Load -> validate/transform -> write to DB -> move to processed/
-    On validation failure: move to quarantine/ and write __errors.csv
-    On unexpected error:   move to quarantine/ and write __fatal.txt
+    Load -> validate/transform -> write to DB -> processed/
+    - If KEEP_INCOMING=true: keep original in incoming/, copy to processed/, write .done marker
+    - On validation failure: move to quarantine/ + __errors.csv
+    - On unexpected error:   move to quarantine/ + __fatal.txt
     """
     try:
         logging.info(f"Processing {fp.name}")
@@ -39,7 +42,7 @@ def process_file(fp: Path, cfg: Config, data_dir: Path, engine):
 
         valid, invalid = validate_transform(df, cfg, fp.name)
 
-        # Any invalid rows? quarantine the whole file + log details
+        # Any invalid rows? quarantine the whole file and log details
         if not invalid.empty:
             qdir = data_dir / "quarantine"
             qpath = move_file(fp, qdir)
@@ -55,7 +58,7 @@ def process_file(fp: Path, cfg: Config, data_dir: Path, engine):
         raw_rows = to_raw_rows(valid, fp.name, cfg.source_name)
         aggs = compute_aggregates(valid, fp.name, cfg.source_name)
 
-        # Write to DB (insert_* have retry/backoff)
+        # Write to DB (insert_* handle retries/backoff)
         insert_raw(engine, raw_rows)
         insert_aggregates(engine, aggs)
 
@@ -63,9 +66,23 @@ def process_file(fp: Path, cfg: Config, data_dir: Path, engine):
         AGG_ROWS_INSERTED.inc(len(aggs))
 
         # Success → processed/
-        move_file(fp, data_dir / "processed")
+        if cfg.keep_incoming:
+            # keep original in incoming, copy to processed
+            copy_file(fp, data_dir / "processed")
+            # .done marker so future scans skip this file
+            try:
+                marker = fp.with_suffix(fp.suffix + MARKER_SUFFIX)
+                marker.write_text(f"processed_at={datetime.utcnow().isoformat()}Z\n")
+            except Exception:
+                pass
+        else:
+            # default behavior: move
+            move_file(fp, data_dir / "processed")
+
         FILES_PROCESSED.inc()
-        logging.info(f"Done: {fp.name} -> processed/")
+        logging.info(
+            f"Done: {fp.name} -> processed/ (keep_incoming={cfg.keep_incoming})"
+        )
 
     except Exception as e:
         logging.exception(f"Failed to process {fp.name}: {e}")
@@ -111,7 +128,13 @@ def run():
 
     def scan_and_process():
         for fp in sorted(inc_dir.glob("*.csv")):
-            # skip zero-byte or locked files
+            # Skip if a .done marker is present (when KEEP_INCOMING=true)
+            if cfg.keep_incoming:
+                marker = fp.with_suffix(fp.suffix + MARKER_SUFFIX)
+                if marker.exists():
+                    continue
+
+            # skip zero-byte or temporarily locked files
             try:
                 if fp.stat().st_size == 0:
                     continue
@@ -120,6 +143,7 @@ def run():
 
             if fp.name in seen:
                 continue
+
             process_file(fp, cfg, data_dir, engine)
             seen.add(fp.name)
 

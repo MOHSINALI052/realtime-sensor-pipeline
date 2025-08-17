@@ -24,3 +24,5 @@ class Config:
     temp_max_c: float = float(os.getenv("TEMP_MAX_C", 50))
     rh_min: float = float(os.getenv("RH_MIN", 0))
     rh_max: float = float(os.getenv("RH_MAX", 100))
+keep_incoming: bool = os.getenv("KEEP_INCOMING", "false").lower() in ("1","true","yes")
+
