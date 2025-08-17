@@ -33,3 +33,23 @@ CREATE TABLE IF NOT EXISTS file_aggregates (
 );
 
 CREATE INDEX IF NOT EXISTS idx_agg_file_type ON file_aggregates(file_name, reading_type);
+-- Idempotency for raw_readings
+ALTER TABLE raw_readings
+  ADD COLUMN IF NOT EXISTS dedupe_key TEXT;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_raw_dedupe
+  ON raw_readings(dedupe_key);
+
+-- Upsert key for aggregates (per file + type)
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conname = 'uq_file_agg'
+  ) THEN
+    ALTER TABLE file_aggregates
+      ADD CONSTRAINT uq_file_agg UNIQUE (file_name, reading_type);
+  END IF;
+END$$;
+
