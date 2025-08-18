@@ -1,0 +1,12 @@
+# .dockerignore
+.venv
+__pycache__/
+*.pyc
+.git
+.env
+*.csv
+data/
+logs/
+docs/
+migrations/
+README.md

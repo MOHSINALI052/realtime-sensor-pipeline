@@ -14,3 +14,43 @@ services:
       - ./schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
 volumes:
   pgdata:
+
+version: '3.9'
+services:
+  postgres:
+    image: postgres:16
+    container_name: rt_postgres
+    environment:
+      POSTGRES_USER: ${PGUSER:-sensor}
+      POSTGRES_PASSWORD: ${PGPASSWORD:-sensorpw}
+      POSTGRES_DB: ${PGDATABASE:-sensordb}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+
+  app:
+    build: .
+    container_name: rt_app
+    depends_on:
+      - postgres
+    environment:
+      PGHOST: postgres
+      PGPORT: 5432
+      PGUSER: ${PGUSER:-sensor}
+      PGPASSWORD: ${PGPASSWORD:-sensorpw}
+      PGDATABASE: ${PGDATABASE:-sensordb}
+      POLL_INTERVAL_SECONDS: ${POLL_INTERVAL_SECONDS:-5}
+      SOURCE_NAME: ${SOURCE_NAME:-kaggle/airquality}
+      DEFAULT_SENSOR_ID: ${DEFAULT_SENSOR_ID:-Station_1}
+      DEFAULT_LOCATION: ${DEFAULT_LOCATION:-Milan_AirQuality}
+      KEEP_INCOMING: ${KEEP_INCOMING:-true}
+    volumes:
+      - ./data:/app/data         # drop CSVs on host -> visible to container
+      - ./src:/app/src           # easy local dev without rebuild
+    ports:
+      - "8000:8000"              # metrics at http://localhost:8000/metrics
+
+volumes:
+  pgdata:
