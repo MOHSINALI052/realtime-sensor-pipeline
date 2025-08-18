@@ -1,21 +1,5 @@
-version: '3.9'
-services:
-  postgres:
-    image: postgres:16
-    container_name: rt_postgres
-    environment:
-      POSTGRES_USER: ${PGUSER:-sensor}
-      POSTGRES_PASSWORD: ${PGPASSWORD:-sensorpw}
-      POSTGRES_DB: ${PGDATABASE:-sensordb}
-    ports:
-      - "5432:5432"
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-      - ./schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
-volumes:
-  pgdata:
+version: "3.9"
 
-version: '3.9'
 services:
   postgres:
     image: postgres:16
@@ -29,12 +13,18 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   app:
     build: .
     container_name: rt_app
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
     environment:
       PGHOST: postgres
       PGPORT: 5432
@@ -48,7 +38,7 @@ services:
       KEEP_INCOMING: ${KEEP_INCOMING:-true}
     volumes:
       - ./data:/app/data         # drop CSVs on host -> visible to container
-      - ./src:/app/src           # easy local dev without rebuild
+      - ./src:/app/src           # dev convenience: edit code without rebuild
     ports:
       - "8000:8000"              # metrics at http://localhost:8000/metrics
 
